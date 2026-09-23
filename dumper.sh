@@ -1533,6 +1533,43 @@ if [[ "${MODE}" == "gitlab" || "${MODE}" == "github" ]]; then
 		' _
 	}
 
+	cleanup_bloat() {
+		local enable_cleanup="${CLEANUP_BLOAT:-${CLEANUP_GAPPS:-true}}"
+		if [[ "${enable_cleanup}" != "true" ]]; then
+			return 0
+		fi
+		echo "Auto-detecting and deleting bloatware, deletable apps & Google Apps..."
+
+		# Remove operator and deletable app directories across all partitions
+		[ -d "${OUTDIR}/tr_region/operator" ] && rm -rf "${OUTDIR}/tr_region/operator"
+		while IFS= read -r dir; do
+			[[ -d "${dir}" ]] || continue
+			echo "Deleting bloat directory: ${dir}"
+			rm -rf "${dir}"
+		done < <(find "${OUTDIR}" -type d \( -name "*del-app*" -o -name "*del_app*" -o -name "*data-app*" \) 2>/dev/null)
+
+		# Delete bloatware APKs & APEX packages (Google apps, OEM ad/store services, Chinese third-party bloat)
+		local apk
+		while IFS= read -r apk; do
+			[[ -n "${apk}" ]] || continue
+			echo "Deleting: ${apk}"
+			rm -f "${apk}"
+		done < <(find "${OUTDIR}" -type f \( -name "*.apk" -o -name "*.apex" \) 2>/dev/null | grep -iE "google|gms|velvet|chrome|youtube|ytmusic|gmail|maps|photos|meet|arcore|speechservices|wellbeing|talkback|setupwizard|androidauto|partnersetup|playautoinstall|privatecompute|familylink|phonesky|trichromelibrary|captiveportallogingoogle|documentsuigoogle|networkstackgoogle|heytap|keke|breeno|finshell|oppostore|gamecenter|quickgame|pictorial|instant|assistantscreen|mspservice|oplusgames|mishop|micredit|mipay|migame|mivoice|mab|analytic|vivostore|vivogame|vivopay|bbkservice|baidu|sogou|tencent|alipay|taobao|weibo|bilibili|netease|amap|autonavi|youku|iqiyi|kuaishou|linktowindows")
+
+		# Remove now-empty directories
+		find "${OUTDIR}" -type d -empty -delete 2>/dev/null
+
+		# Regenerate all_files.txt after cleanup
+		printf "Regenerating all_files.txt...\n"
+		find "${OUTDIR}" -type f -printf '%P\n' | sort | grep -v ".git/" > "${OUTDIR}"/all_files.txt
+	}
+
+	# Backward compatibility alias
+	cleanup_google_apps() {
+		cleanup_bloat "$@"
+	}
+
+
 	commit_and_push(){
 		local DIRS=(
 			"system_ext"
@@ -1576,10 +1613,14 @@ if [[ "${MODE}" == "gitlab" || "${MODE}" == "github" ]]; then
 			retry_push -u origin "${branch}" || exit 1
 		}
 
-		find . -type f -name '*.apk' -exec git add {} +
-		git commit -sm "Add apps for ${description}"
-		push_lfs_objects || exit 1
-		retry_push -u origin "${branch}" || exit 1
+		if find . -type f -name '*.apk' | grep -q .; then
+			find . -type f -name '*.apk' -exec git add {} +
+			if ! git diff --cached --quiet; then
+				git commit -sm "Add apps for ${description}"
+				push_lfs_objects || exit 1
+				retry_push -u origin "${branch}" || exit 1
+			fi
+		fi
 
 		for i in "${DIRS[@]}"; do
 			[ -d "${i}" ] && git add "${i}"
@@ -1610,6 +1651,8 @@ if [[ -n "${GITLAB_TOKEN}" ]]; then
 
 	# Check if already dumped or not
 	[[ $(curl -sL "${GITLAB_HOST}/${GIT_ORG}/${repo}/-/raw/${branch}/all_files.txt" | grep "all_files.txt") ]] && { printf "Firmware already dumped!\nGo to https://%s/%s/%s/-/tree/%s\n" "${GITLAB_INSTANCE}" "${GIT_ORG}" "${repo}" "${branch}" && exit 1; }
+
+	cleanup_bloat
 
 	# Remove The Journal File Inside System/Vendor
 	find . -mindepth 2 -type d -name "\[SYS\]" -exec rm -rf {} \; 2>/dev/null
@@ -1731,6 +1774,8 @@ if [[ -n "${GITHUB_TOKEN}" ]]; then
 
 	# Check if already dumped or not
 	[[ $(curl -sL "https://raw.githubusercontent.com/${GIT_ORG}/${GH_REPO}/${branch}/all_files.txt" | grep "all_files.txt") ]] && { printf "Firmware already dumped!\nGo to https://github.com/%s/%s/tree/%s\n" "${GIT_ORG}" "${GH_REPO}" "${branch}" && exit 1; }
+
+	cleanup_bloat
 
 	# Remove The Journal File Inside System/Vendor
 	find . -mindepth 2 -type d -name "\[SYS\]" -exec rm -rf {} \; 2>/dev/null

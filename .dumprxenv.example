@@ -15,3 +15,8 @@ export GITHUB_ORG="" # Optional: Your GitHub organization name. If empty, your p
 # Telegram Configuration
 export TG_TOKEN=""
 export TG_CHAT="" # Optional: Your Telegram chat ID. If empty, "@DumprXDumps" will be used.
+
+# Bloatware Cleanup Settings
+# export CLEANUP_BLOAT="true"  # Auto-detect and remove bloatware, deletable apps & Google Apps before pushing (default: true)
+
+

@@ -205,6 +205,14 @@ Using `retry_push lfs push ...` would become the wrong command (`git push lfs pu
   patterns are always (re)generated so a reused `OUTDIR` still picks up files between
   50 MB and 100 MB.
 
+### Bloatware Cleanup
+Before pushing:
+
+`cleanup_bloat()` auto-detects and deletes Google Apps, carrier/operator apps (`tr_region/operator`), deletable app directories (`*/del-app`, `*/data-app`), Chinese OEM bloat/stores/services (HeyTap, KeKe, Breeno, FinShell, Baidu, Sogou, Tencent, Alipay, Weibo, etc.), and now-empty directories, then updates `all_files.txt`. Can be disabled via `CLEANUP_BLOAT="false"` (or legacy `CLEANUP_GAPPS="false"`).
+
+
+
+
 ## Shell Style Guidelines
 
 - Existing code uses Bash features: `[[ ]]`, arrays, regex matching, process substitution, functions.
