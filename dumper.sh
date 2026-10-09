@@ -1668,42 +1668,54 @@ if [[ -n "${GITLAB_TOKEN}" ]]; then
 	[[ -z "$(git config --get user.name)" ]] && git config user.name "Rama Bondan Prakoso"
 
 	# Create Subgroup
-	GRP_ID=$(curl -s --request GET --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}" | jq -r '.id')
+	GRP_JSON=$(curl -s --request GET --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}")
+	GRP_ID=$(printf '%s' "${GRP_JSON}" | jq -r '.id // empty' 2>/dev/null)
 	if [[ -z "${GRP_ID}" || "${GRP_ID}" == "null" ]]; then
 		printf "Error: Could not find GitLab group '%s'. Check GITLAB_GROUP in .dumprxenv\n" "${GIT_ORG}"
 		exit 1
 	fi
+
+	# Determine effective visibility (cannot be more permissive than parent group)
+	PARENT_VIS=$(printf '%s' "${GRP_JSON}" | jq -r '.visibility // "public"' 2>/dev/null)
+	TARGET_VIS="${REPO_VISIBILITY}"
+	if [[ "${PARENT_VIS}" == "private" ]]; then
+		TARGET_VIS="private"
+	elif [[ "${PARENT_VIS}" == "internal" && "${TARGET_VIS}" == "public" ]]; then
+		TARGET_VIS="internal"
+	fi
+
 	mfr_lower=$(echo "${manufacturer}" | tr '[:upper:]' '[:lower:]')
-	curl -s --request POST \
-	--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-	--header "Content-Type: application/json" \
-	--data '{"name": "'"${manufacturer}"'", "path": "'"${mfr_lower}"'", "visibility": "public", "parent_id": "'"${GRP_ID}"'"}' \
-	"${GITLAB_HOST}/api/v4/groups/" > /dev/null
+	SUBGRP_RESP=$(curl -s --request POST \
+		--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+		--header "Content-Type: application/json" \
+		--data '{"name": "'"${manufacturer}"'", "path": "'"${mfr_lower}"'", "visibility": "'"${TARGET_VIS}"'", "parent_id": "'"${GRP_ID}"'"}' \
+		"${GITLAB_HOST}/api/v4/groups/")
+	SUBGRP_ID=$(printf '%s' "${SUBGRP_RESP}" | jq -r '.id // empty' 2>/dev/null)
 
-	# Look up ID by name using jq — no temp files, no race conditions
-	get_gitlab_id_by_name() {
-		# Usage: get_gitlab_id_by_name <api_url> <name_to_match>
-		local api_url="$1" match_name="$2"
-		curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${api_url}" \
-			| jq -r --arg n "${match_name}" '.[] | select(.name == $n) | .id'
-	}
-
-	SUBGRP_ID=$(get_gitlab_id_by_name "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}/subgroups" "${manufacturer}")
-	if [[ -z "${SUBGRP_ID}" ]]; then
-		printf "Error: Could not find subgroup for manufacturer '%s'\n" "${manufacturer}"
+	# If subgroup creation didn't return an ID (e.g. already existed or API error), look it up
+	if [[ -z "${SUBGRP_ID}" || "${SUBGRP_ID}" == "null" ]]; then
+		SUBGRP_ID=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_HOST}/api/v4/groups/${GRP_ID}/subgroups?per_page=100" \
+			| jq -r --arg n "${manufacturer}" --arg p "${mfr_lower}" '.[] | select((.name | ascii_downcase) == ($n | ascii_downcase) or (.path | ascii_downcase) == $p) | .id' 2>/dev/null | head -1)
+	fi
+	if [[ -z "${SUBGRP_ID}" || "${SUBGRP_ID}" == "null" ]]; then
+		printf "Error: Could not find or create subgroup for manufacturer '%s'.\nGitLab API response: %s\n" "${manufacturer}" "${SUBGRP_RESP}"
 		exit 1
 	fi
 
 	# Create Repository
-	curl -s \
-	--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-	-X POST \
-	"${GITLAB_HOST}/api/v4/projects?name=${codename}&namespace_id=${SUBGRP_ID}&visibility=public" > /dev/null
+	PROJ_RESP=$(curl -s \
+		--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+		-X POST \
+		"${GITLAB_HOST}/api/v4/projects?name=${codename}&namespace_id=${SUBGRP_ID}&visibility=${TARGET_VIS}")
+	PROJECT_ID=$(printf '%s' "${PROJ_RESP}" | jq -r '.id // empty' 2>/dev/null)
 
-	# Get Project/Repo ID — reuse the same jq-based lookup
-	PROJECT_ID=$(get_gitlab_id_by_name "${GITLAB_HOST}/api/v4/groups/${SUBGRP_ID}/projects" "${codename}")
-	if [[ -z "${PROJECT_ID}" ]]; then
-		printf "Error: Could not find project '%s' in subgroup %s\n" "${codename}" "${SUBGRP_ID}"
+	# If project creation didn't return an ID (e.g. already existed), look it up
+	if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "null" ]]; then
+		PROJECT_ID=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_HOST}/api/v4/groups/${SUBGRP_ID}/projects?per_page=100" \
+			| jq -r --arg n "${codename}" '.[] | select((.name | ascii_downcase) == ($n | ascii_downcase) or (.path | ascii_downcase) == ($n | ascii_downcase)) | .id' 2>/dev/null | head -1)
+	fi
+	if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "null" ]]; then
+		printf "Error: Could not find or create project '%s' in subgroup %s.\nGitLab API response: %s\n" "${codename}" "${SUBGRP_ID}" "${PROJ_RESP}"
 		exit 1
 	fi
 
@@ -1715,7 +1727,7 @@ if [[ -n "${GITLAB_TOKEN}" ]]; then
 	# Ensure the target repo visibility
 	REPO_DESC="${codename}"
 	[[ -n "${transname}" ]] && REPO_DESC="${transname}"
-	curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" --url "${GITLAB_HOST}/api/v4/projects/${PROJECT_ID}" --data "visibility=${REPO_VISIBILITY}" --data-urlencode "description=${REPO_DESC}"
+	curl -s --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" --url "${GITLAB_HOST}/api/v4/projects/${PROJECT_ID}" --data "visibility=${TARGET_VIS}" --data-urlencode "description=${REPO_DESC}" > /dev/null
 	printf "\n"
 
 	printf "\nPushing to %s via SSH...\nBranch:%s\n" "${GITLAB_HOST}/${GIT_ORG}/${repo}.git" "${branch}"
